@@ -6,6 +6,7 @@ import Dict exposing (Dict)
 import DogApi exposing (DogBreedDetailsResponse, DogBreedsResponse, fetchBreedDetails, fetchBreeds)
 import Html exposing (..)
 import Html.Attributes exposing (..)
+import Html.Events exposing (onClick)
 import Http
 import Routes exposing (BreedName, Route(..))
 import Url
@@ -68,6 +69,7 @@ type BreedDetailPageState
     | LoadedDetail
         { breedName : String
         , breedDetails : BreedDetails
+        , pageNumber : Int
         }
 
 
@@ -94,6 +96,7 @@ type Msg
     | UrlChanged Url.Url
     | GotBreeds (Result Http.Error DogBreedsResponse)
     | GotBreedDetails String (Result Http.Error DogBreedDetailsResponse)
+    | ChangePage Int
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -152,7 +155,10 @@ update msg model =
                 | page =
                     BreedDetailPage
                         (LoadedDetail
-                            { breedName = breedName, breedDetails = breedDetails }
+                            { breedName = breedName
+                            , breedDetails = breedDetails
+                            , pageNumber = 0
+                            }
                         )
                 , cache = newCache
               }
@@ -161,6 +167,20 @@ update msg model =
 
         GotBreedDetails breedName (Err error) ->
             ( model, Cmd.none )
+
+        ChangePage pageNumber ->
+            case model.page of
+                BreedDetailPage (LoadedDetail details) ->
+                    ( { model
+                        | page =
+                            BreedDetailPage
+                                (LoadedDetail { details | pageNumber = pageNumber })
+                      }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
 
 
 withRouteChangeHandler : Model -> Route -> ( Model, Cmd Msg )
@@ -177,7 +197,16 @@ withRouteChangeHandler model route =
         BreedDetail breedName ->
             case Dict.get breedName model.cache.breedDetails of
                 Just (Just details) ->
-                    ( { model | page = BreedDetailPage (LoadedDetail { breedName = breedName, breedDetails = details }) }
+                    ( { model
+                        | page =
+                            BreedDetailPage
+                                (LoadedDetail
+                                    { breedName = breedName
+                                    , breedDetails = details
+                                    , pageNumber = 0
+                                    }
+                                )
+                      }
                     , Cmd.none
                     )
 
@@ -225,7 +254,11 @@ viewBreedListPage listPageState =
             [ text "Loading breeds..." ]
 
         Loaded breeds ->
-            [ ul [] (List.map viewBreedLink breeds.breeds) ]
+            let
+                sortedBreeds =
+                    List.sort breeds.breeds
+            in
+            [ ul [] (List.map viewBreedLink sortedBreeds) ]
 
 
 viewBreedDetailPage : BreedDetailPageState -> List (Html Msg)
@@ -235,10 +268,26 @@ viewBreedDetailPage detailPageState =
             [ text "Loading breed details..." ]
 
         LoadedDetail details ->
+            let
+                paginationSize =
+                    20
+
+                totalPages =
+                    ceiling (toFloat (List.length details.breedDetails.images) / toFloat paginationSize) - 1
+
+                startIdx =
+                    details.pageNumber * paginationSize
+
+                currentPageImages =
+                    details.breedDetails.images
+                        |> List.drop startIdx
+                        |> List.take paginationSize
+            in
             [ div []
                 [ h1 [] [ text (details.breedName ++ " breed") ]
-                , h3 [] [ text ("Images: " ++ String.fromInt (List.length details.breedDetails.images)) ]
-                , div [] (List.map viewBreedImage (List.take 20 details.breedDetails.images))
+                , h3 [] [ text (String.fromInt (List.length details.breedDetails.images) ++ " images") ]
+                , viewPagination details.pageNumber totalPages
+                , div [] (List.map viewBreedImage currentPageImages)
                 ]
             ]
 
@@ -246,6 +295,24 @@ viewBreedDetailPage detailPageState =
 viewBreedLink : String -> Html msg
 viewBreedLink breed =
     li [] [ a [ href ("/breed/" ++ breed) ] [ text breed ] ]
+
+
+viewPagination : Int -> Int -> Html Msg
+viewPagination currentPage totalPages =
+    div [ style "margin" "20px 0" ]
+        [ button
+            [ onClick (ChangePage (Basics.max 0 (currentPage - 1)))
+            , disabled (currentPage == 0)
+            ]
+            [ text "Previous" ]
+        , span [ style "margin" "0 10px" ]
+            [ text (String.fromInt (currentPage + 1) ++ " of " ++ String.fromInt (totalPages + 1)) ]
+        , button
+            [ onClick (ChangePage (Basics.min totalPages (currentPage + 1)))
+            , disabled (currentPage == totalPages)
+            ]
+            [ text "Next" ]
+        ]
 
 
 viewBreedImage : String -> Html msg
