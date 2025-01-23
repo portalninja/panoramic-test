@@ -1,9 +1,13 @@
-module Main exposing (Model, Msg(..), init, main, subscriptions, update, view, viewLink)
+module Main exposing (main)
 
 import Browser
 import Browser.Navigation as Nav
+import Dict exposing (Dict)
+import DogApi exposing (DogBreedDetailsResponse, DogBreedsResponse, fetchBreedDetails, fetchBreeds)
 import Html exposing (..)
 import Html.Attributes exposing (..)
+import Http
+import Routes exposing (BreedName, Route(..))
 import Url
 
 
@@ -28,14 +32,57 @@ main =
 
 
 type alias Model =
-    { key : Nav.Key
-    , url : Url.Url
+    { page : Page
+    , cache : Cache
+    , navKey : Nav.Key
+    , navUrl : Url.Url
     }
+
+
+type Page
+    = BreedListPage BreedListPageState
+    | BreedDetailPage BreedDetailPageState
+
+
+type alias Cache =
+    { breeds : Maybe Breeds
+    , breedDetails : Dict BreedName (Maybe BreedDetails)
+    }
+
+
+type alias Breeds =
+    { breeds : List String }
+
+
+type alias BreedDetails =
+    { images : List String }
+
+
+type BreedListPageState
+    = Loading
+    | Loaded Breeds
+
+
+type BreedDetailPageState
+    = LoadingDetail
+    | LoadedDetail
+        { breedName : String
+        , breedDetails : BreedDetails
+        }
 
 
 init : () -> Url.Url -> Nav.Key -> ( Model, Cmd Msg )
 init flags url key =
-    ( Model key url, Cmd.none )
+    ( { page = BreedListPage Loading
+      , cache =
+            { breeds = Nothing
+            , breedDetails = Dict.empty
+            }
+      , navKey = key
+      , navUrl = url
+      }
+    , fetchBreeds GotBreeds
+    )
 
 
 
@@ -45,6 +92,8 @@ init flags url key =
 type Msg
     = LinkClicked Browser.UrlRequest
     | UrlChanged Url.Url
+    | GotBreeds (Result Http.Error DogBreedsResponse)
+    | GotBreedDetails String (Result Http.Error DogBreedDetailsResponse)
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -53,15 +102,89 @@ update msg model =
         LinkClicked urlRequest ->
             case urlRequest of
                 Browser.Internal url ->
-                    ( model, Nav.pushUrl model.key (Url.toString url) )
+                    ( model, Nav.pushUrl model.navKey (Url.toString url) )
 
                 Browser.External href ->
                     ( model, Nav.load href )
 
         UrlChanged url ->
-            ( { model | url = url }
+            let
+                route =
+                    Routes.parseUrl url
+            in
+            withRouteChangeHandler model route
+
+        GotBreeds (Ok breedsResponse) ->
+            let
+                breeds =
+                    Breeds (Dict.keys breedsResponse.message)
+
+                newCache =
+                    { breeds = Just breeds
+                    , breedDetails = model.cache.breedDetails
+                    }
+            in
+            ( { model
+                | page = BreedListPage (Loaded breeds)
+                , cache = newCache
+              }
             , Cmd.none
             )
+
+        GotBreeds (Err error) ->
+            ( model, Cmd.none )
+
+        GotBreedDetails breedName (Ok breedDetailsResponse) ->
+            let
+                breedDetails =
+                    BreedDetails breedDetailsResponse.message
+
+                newCache =
+                    { breeds = model.cache.breeds
+                    , breedDetails =
+                        Dict.insert
+                            breedName
+                            (Just breedDetails)
+                            model.cache.breedDetails
+                    }
+            in
+            ( { model
+                | page =
+                    BreedDetailPage
+                        (LoadedDetail
+                            { breedName = breedName, breedDetails = breedDetails }
+                        )
+                , cache = newCache
+              }
+            , Cmd.none
+            )
+
+        GotBreedDetails breedName (Err error) ->
+            ( model, Cmd.none )
+
+
+withRouteChangeHandler : Model -> Route -> ( Model, Cmd Msg )
+withRouteChangeHandler model route =
+    case route of
+        BreedList ->
+            case model.cache.breeds of
+                Just breeds ->
+                    ( { model | page = BreedListPage (Loaded breeds) }, Cmd.none )
+
+                Nothing ->
+                    ( { model | page = BreedListPage Loading }, fetchBreeds GotBreeds )
+
+        BreedDetail breedName ->
+            case Dict.get breedName model.cache.breedDetails of
+                Just (Just details) ->
+                    ( { model | page = BreedDetailPage (LoadedDetail { breedName = breedName, breedDetails = details }) }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( { model | page = BreedDetailPage LoadingDetail }
+                    , fetchBreedDetails breedName (GotBreedDetails breedName)
+                    )
 
 
 
@@ -79,21 +202,60 @@ subscriptions _ =
 
 view : Model -> Browser.Document Msg
 view model =
-    { title = "URL Interceptor"
+    { title = "Panoramic Dogs"
     , body =
-        [ text "The current URL is: "
-        , b [] [ text (Url.toString model.url) ]
-        , ul []
-            [ viewLink "/home"
-            , viewLink "/profile"
-            , viewLink "/reviews/the-century-of-the-self"
-            , viewLink "/reviews/public-opinion"
-            , viewLink "/reviews/shah-of-shahs"
-            ]
-        ]
+        viewBody model
     }
 
 
-viewLink : String -> Html msg
-viewLink path =
-    li [] [ a [ href path ] [ text path ] ]
+viewBody : Model -> List (Html Msg)
+viewBody model =
+    case model.page of
+        BreedListPage listPageState ->
+            viewBreedListPage listPageState
+
+        BreedDetailPage detailPageState ->
+            viewBreedDetailPage detailPageState
+
+
+viewBreedListPage : BreedListPageState -> List (Html Msg)
+viewBreedListPage listPageState =
+    case listPageState of
+        Loading ->
+            [ text "Loading breeds..." ]
+
+        Loaded breeds ->
+            [ ul [] (List.map viewBreedLink breeds.breeds) ]
+
+
+viewBreedDetailPage : BreedDetailPageState -> List (Html Msg)
+viewBreedDetailPage detailPageState =
+    case detailPageState of
+        LoadingDetail ->
+            [ text "Loading breed details..." ]
+
+        LoadedDetail details ->
+            [ div []
+                [ h1 [] [ text (details.breedName ++ " breed") ]
+                , h3 [] [ text ("Images: " ++ String.fromInt (List.length details.breedDetails.images)) ]
+                , div [] (List.map viewBreedImage (List.take 20 details.breedDetails.images))
+                ]
+            ]
+
+
+viewBreedLink : String -> Html msg
+viewBreedLink breed =
+    li [] [ a [ href ("/breed/" ++ breed) ] [ text breed ] ]
+
+
+viewBreedImage : String -> Html msg
+viewBreedImage imageUrl =
+    img
+        [ src imageUrl
+        , style "width" "200px"
+        , style "margin" "6px"
+        , style "border" "1px solid #ccc"
+        , style "border-radius" "4px"
+        , style "box-shadow" "0 4px 8px rgba(0, 0, 0, 0.1)"
+        ]
+        []
